@@ -41,7 +41,7 @@ from datasets import load_dataset
 CONFIG = {
     "dim_sem": 512,
     "epochs": 40,
-    "batch_size": 8192,      # Reducido de 16k a 8k para evitar picos de VRAM
+    "batch_size": 4096,      # Reducido de 16k a 8k para evitar picos de VRAM
     "lr": 0.005,
     "num_negativos": 127,    # Presión termodinámica extrema
     "temp_train": 2.0,
