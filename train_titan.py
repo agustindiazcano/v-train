@@ -47,7 +47,7 @@ CONFIG = {
     "temp_train": 2.0,
     "temp_eval": 1.5,
     "precision": "bf16-mixed", # TensorCores de la H100 al máximo
-    "train_limit": 100000    # Experimento Pesado: 100k párrafos
+    "train_limit": 50000    # Experimento Pesado: 100k párrafos
 }
 
 pl.seed_everything(42)
