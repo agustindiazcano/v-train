@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # =============================================================================
-# MONOLITO LVM-TITAN V11.1: RUNPOD EDITION (BLINDADO CONTRA OOM)
+# LVM-TITAN V11.2
 # =============================================================================
 import os
 import sys
 import time
 import math
 import subprocess
+from collections import Counter
 
 # -----------------------------------------------------------------------------
 # 0. BOOTSTRAP
@@ -28,8 +29,6 @@ def install_deps():
 install_deps()
 
 import spacy
-import faiss
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,46 +39,60 @@ from datasets import load_dataset
 # --- CONFIGURACIÓN DE GRADO INDUSTRIAL (H100 - 80GB) ---
 CONFIG = {
     "dim_sem": 512,
-    "epochs": 40,
-    "batch_size": 4096,      # Reducido de 16k a 8k para evitar picos de VRAM
+    "epochs": 4,             # Reducido para forzar generalización fluida
+    "batch_size": 4096,      # Blindaje contra OOM Killer
     "lr": 0.005,
     "num_negativos": 127,    # Presión termodinámica extrema
     "temp_train": 2.0,
     "temp_eval": 1.5,
-    "precision": "bf16-mixed", # TensorCores de la H100 al máximo
-    "train_limit": 50000    # Experimento Pesado: 100k párrafos
+    "precision": "bf16-mixed", 
+    "train_limit": 500000,   
+    "vocab_limit": 30000     
 }
 
 pl.seed_everything(42)
 
 # -----------------------------------------------------------------------------
-# 1. INGESTA Y TOPOLOGÍA
+# 1. INGESTA Y TOPOLOGÍA (PURGA DE RUIDO)
 # -----------------------------------------------------------------------------
 print(f"\n🚜 [FASE 1] Extrayendo Topología SE(3) de WikiText-103 ({CONFIG['train_limit']} párrafos)...")
 dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
 textos = [txt for txt in dataset['text'] if len(txt.strip()) > 50][:CONFIG["train_limit"]]
 
 nlp = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
-vocabulario = {"[PAD]": 0, "[UNK]": 1}
-enlaces = []
+
+# Extraer frecuencias para aislar la gravedad semántica real
+frecuencias = Counter()
+enlaces_crudos = []
 SOCKET_MAP = {"nsubj": 0, "csubj": 0, "dobj": 1, "pobj": 1, "amod": 2, "advmod": 2}
 
 for doc in nlp.pipe(textos, batch_size=1000, n_process=2):
     for token in doc:
         if token.is_punct or token.is_space or token.dep_ == "ROOT": continue
         lem, h_lem = token.lemma_.lower(), token.head.lemma_.lower()
-        for l in [lem, h_lem]:
-            if l not in vocabulario: vocabulario[l] = len(vocabulario)
-        enlaces.append((vocabulario[lem], vocabulario[h_lem], SOCKET_MAP.get(token.dep_, 3)))
+        frecuencias[lem] += 1
+        frecuencias[h_lem] += 1
+        enlaces_crudos.append((lem, h_lem, SOCKET_MAP.get(token.dep_, 3)))
+
+# Conservar solo el núcleo gravitacional del idioma
+vocab_valido = {k for k, v in frecuencias.most_common(CONFIG["vocab_limit"])}
+vocabulario = {"[PAD]": 0, "[UNK]": 1}
+enlaces = []
+
+for lem, h_lem, dep in enlaces_crudos:
+    if lem in vocab_valido and h_lem in vocab_valido:
+        if lem not in vocabulario: vocabulario[lem] = len(vocabulario)
+        if h_lem not in vocabulario: vocabulario[h_lem] = len(vocabulario)
+        enlaces.append((vocabulario[lem], vocabulario[h_lem], dep))
 
 t_p = torch.tensor([e[0] for e in enlaces])
 t_s = torch.tensor([e[1] for e in enlaces])
 t_t = torch.tensor([e[2] for e in enlaces])
 V_SIZE = len(vocabulario)
 
-# FIX CLAVE: num_workers=0 evita el crasheo silencioso de Docker por RAM
+# DataLoader blindado (num_workers=0)
 loader = DataLoader(TensorDataset(t_p, t_s, t_t), batch_size=CONFIG["batch_size"], shuffle=True, num_workers=0)
-print(f"📊 Vocabulario Forjado: {V_SIZE} palabras. Total Encastres: {len(t_p)}")
+print(f"📊 Vocabulario Forjado: {V_SIZE} palabras. Total Encastres Válidos: {len(t_p)}")
 
 # -----------------------------------------------------------------------------
 # 2. MOTOR FÍSICO SE(3) + INFONCE
@@ -141,7 +154,8 @@ class LVM_Titan(pl.LightningModule):
 # -----------------------------------------------------------------------------
 print(f"\n🔥 [FASE 2] Encendiendo Reactor H100 (Precision: {CONFIG['precision']})")
 model = LVM_Titan()
-trainer = pl.Trainer(max_epochs=CONFIG["epochs"], accelerator="gpu", devices=1, precision=CONFIG["precision"], enable_checkpointing=False)
+# Checkpointing encendido por seguridad ante la masividad de datos
+trainer = pl.Trainer(max_epochs=CONFIG["epochs"], accelerator="gpu", devices=1, precision=CONFIG["precision"], enable_checkpointing=True)
 trainer.fit(model, loader)
 
 # -----------------------------------------------------------------------------
@@ -166,6 +180,8 @@ val_p = torch.tensor([e[0] for e in val_enlaces])
 val_s = torch.tensor([e[1] for e in val_enlaces])
 val_t = torch.tensor([e[2] for e in val_enlaces])
 val_loader = DataLoader(TensorDataset(val_p, val_s, val_t), batch_size=1024, shuffle=False)
+
+import math
 
 @torch.no_grad()
 def evaluate_perplexity(modelo, loader, temp):
